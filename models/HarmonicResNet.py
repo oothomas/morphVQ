@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 import torch_geometric.transforms as T
 
-from SURFMNet.utils import SURFMNetLoss, SoftcorNet
+from SURFMNet import SURFMNetLoss, SoftcorNet
 
 # Harmonic Surface Networks components Layers
 from nn import HarmonicResNetBlock, ParallelTransportPool, ParallelTransportUnpool, ComplexLin, ComplexNonLin
