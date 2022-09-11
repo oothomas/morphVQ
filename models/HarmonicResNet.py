@@ -1,5 +1,5 @@
 import torch
-import torch.nn as nn
+# import torch.nn as nn
 import torch.nn.functional as F
 
 import torch_geometric.transforms as T
@@ -176,73 +176,80 @@ class HarmonicResNet(torch.nn.Module):
 
 
 class SiameseHSN(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, max_order=1, n_rings=4, num_evecs=70, nf=None, radii=None):
         super(SiameseHSN, self).__init__()
 
         # Maximum rotation order for streams
-        max_order = 1
+        if radii is None:
+            radii = [0.1, 0.2, 0.4, 0.8]
+        if nf is None:
+            nf = [8, 16, 32, 64]
+
+        self.max_order = max_order
 
         # Number of rings in the radial profile
-        n_rings = 4
+        self.n_rings = n_rings
 
         # Number of filters per block
-        nf = [8, 16, 32, 48]
+        self.nf = nf
 
         # Radii
-        radii = [0.1, 0.2, 0.4, 0.8]
+        self.radii = radii
+
+        self.num_evecs = num_evecs
 
         scale_transform = []
-
 
         # Transformations that mask the edges and vertices per scale and precomputes convolution components.
         scale_transform.append(T.Compose((
             ScaleMask(0),
-            FilterNeighbours(radius=radii[0]),
-            HarmonicPrecomp(n_rings, max_order, max_r=radii[0]))))
+            FilterNeighbours(radius=self.radii[0]),
+            HarmonicPrecomp(self.n_rings, self.max_order, max_r=self.radii[0]))))
         scale_transform.append(T.Compose((
             ScaleMask(1),
-            FilterNeighbours(radius=radii[1]),
-            HarmonicPrecomp(n_rings, max_order, max_r=radii[1]))))
+            FilterNeighbours(radius=self.radii[1]),
+            HarmonicPrecomp(self.n_rings, self.max_order, max_r=self.radii[1]))))
 
         scale_transform.append(T.Compose((
             ScaleMask(2),
-            FilterNeighbours(radius=radii[2]),
-            HarmonicPrecomp(n_rings, max_order, max_r=radii[2]))))
+            FilterNeighbours(radius=self.radii[2]),
+            HarmonicPrecomp(self.n_rings, self.max_order, max_r=self.radii[2]))))
 
         scale_transform.append(T.Compose((
             ScaleMask(3),
-            FilterNeighbours(radius=radii[3]),
-            HarmonicPrecomp(n_rings, max_order, max_r=radii[3]))))
+            FilterNeighbours(radius=self.radii[3]),
+            HarmonicPrecomp(self.n_rings, self.max_order, max_r=self.radii[3]))))
 
-        self.net = HarmonicResNet(nf, max_order, n_rings, scale_transform).to("cuda:0")
+        self.hsn = HarmonicResNet(self.nf, self.max_order, self.n_rings, scale_transform).to("cuda:0")
         self.fmap = SoftcorNet().to("cuda:1")
-        self.loss = SURFMNetLoss().to("cuda:2")
+        self.loss = SURFMNetLoss().to("cuda:1")
 
     def forward(self, src_data, tar_data):
-        src_feat, src_verts = self.net(src_data.to("cuda:0"))
-        tar_feat, tar_verts = self.net(tar_data.to("cuda:0"))
+        src_feat, src_verts = self.hsn(src_data.to("cuda:0"))
+        tar_feat, tar_verts = self.hsn(tar_data.to("cuda:0"))
 
-        evecs_trans_1 = src_data.evecs_trans[:100, :].unsqueeze(0).to("cuda:1")
-        evecs_trans_2 = tar_data.evecs_trans[:100, :].unsqueeze(0).to("cuda:1")
+        evecs_trans_1 = src_data.evecs_trans[:self.num_evecs, :].unsqueeze(0).to("cuda:1")
+        evecs_trans_2 = tar_data.evecs_trans[:self.num_evecs, :].unsqueeze(0).to("cuda:1")
 
         P12, C12 = self.fmap(src_feat.to("cuda:1"), tar_feat.to("cuda:1"),
-                             src_data.evecs[:, :100].unsqueeze(0).to("cuda:1"),
-                             tar_data.evecs[:, :100].unsqueeze(0).to("cuda:1"),
+                             src_data.evecs[:, :self.num_evecs].unsqueeze(0).to("cuda:1"),
+                             tar_data.evecs[:, :self.num_evecs].unsqueeze(0).to("cuda:1"),
                              evecs_trans_1, evecs_trans_2)
+
         P21, C21 = self.fmap(tar_feat.to("cuda:1"), src_feat.to("cuda:1"),
-                             tar_data.evecs[:, :100].unsqueeze(0).to("cuda:1"),
-                             src_data.evecs[:, :100].unsqueeze(0).to("cuda:1"),
+                             tar_data.evecs[:, :self.num_evecs].unsqueeze(0).to("cuda:1"),
+                             src_data.evecs[:, :self.num_evecs].unsqueeze(0).to("cuda:1"),
                              evecs_trans_2, evecs_trans_1)
 
-        evecs_1 = src_data.evecs[:, :100].unsqueeze(0)
-        evecs_2 = tar_data.evecs[:, :100].unsqueeze(0)
-        evals_1 = src_data.evals[:100].unsqueeze(0).squeeze(-1)
-        evals_2 = tar_data.evals[:100].unsqueeze(0).squeeze(-1)
+        evecs_1 = src_data.evecs[:, :self.num_evecs].unsqueeze(0)
+        evecs_2 = tar_data.evecs[:, :self.num_evecs].unsqueeze(0)
+        evals_1 = src_data.evals[:self.num_evecs].unsqueeze(0).squeeze(-1)
+        evals_2 = tar_data.evals[:self.num_evecs].unsqueeze(0).squeeze(-1)
 
-        E1, E2, E3, E4 = self.loss(C12.to("cuda:3"), C21.to("cuda:3"),
-                                   src_feat.to("cuda:3"), tar_feat.to("cuda:3"),
-                                   evecs_1.to("cuda:3"), evecs_2.to("cuda:3"),
-                                   evals_1.to("cuda:3"), evals_2.to("cuda:3"),
-                                   torch.device('cuda:3'))
+        E1, E2, E3, E4 = self.loss(C12.to("cuda:1"), C21.to("cuda:1"),
+                                   src_feat.to("cuda:1"), tar_feat.to("cuda:1"),
+                                   evecs_1.to("cuda:1"), evecs_2.to("cuda:1"),
+                                   evals_1.to("cuda:1"), evals_2.to("cuda:1"),
+                                   torch.device('cuda:1'))
 
         return C12, C21, src_feat, tar_feat, src_verts, tar_verts, E1, E2, E3, E4, P12, P21
